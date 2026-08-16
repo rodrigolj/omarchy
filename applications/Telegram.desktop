@@ -1,0 +1,8 @@
+[Desktop Entry]
+Version=1.0
+Name=Telegram
+Exec=omarchy-launch-webapp https://web.telegram.org/
+Terminal=false
+Type=Application
+Icon=telegram
+StartupNotify=true

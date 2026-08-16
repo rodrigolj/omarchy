@@ -44,6 +44,12 @@ You can start Grok using `Super + Shift + Alt + A`.
 
 You can start WhatsApp using `Super + Shift + Alt + G`.
 
+## Telegram
+
+[Telegram](https://telegram.org/) is a cloud-based messaging service with an official web client.
+
+You can start Telegram using the application launcher (`Super + Space`).
+
 ## Google apps
 
 Google Messages, Google Photos, Google Maps, and Google Contacts are all included as web apps too.
