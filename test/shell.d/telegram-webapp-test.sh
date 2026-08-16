@@ -4,38 +4,60 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
-desktop="$ROOT/applications/Telegram.desktop"
 migration="$ROOT/migrations/1786881090.sh"
 
-[[ -f $desktop ]] || fail "Telegram ships a desktop launcher"
-grep -Fx 'Name=Telegram' "$desktop" >/dev/null || fail "Telegram launcher uses the product name"
-grep -Fx 'Exec=omarchy-launch-webapp https://web.telegram.org/' "$desktop" >/dev/null ||
-  fail "Telegram launcher uses the canonical web app entry point"
-grep -Fx 'Icon=telegram' "$desktop" >/dev/null || fail "Telegram launcher uses its packaged icon"
-[[ -s $ROOT/applications/icons/Telegram.png ]] || fail "Telegram ships its launcher icon"
-pass "Telegram ships as a frameless default web app"
+require_command desktop-file-validate
+require_command python3
 
 test_tmp=$(mktemp -d)
 trap 'rm -rf "$test_tmp"' EXIT
 
 mkdir -p "$test_tmp/bin" "$test_tmp/home"
-cat >"$test_tmp/bin/omarchy-refresh-applications" <<'SH'
+cat >"$test_tmp/bin/omarchy-mise-install" <<'SH'
 #!/bin/bash
-printf 'refresh\n' >>"$OMARCHY_TEST_LOG"
+exit 0
 SH
-chmod +x "$test_tmp/bin/omarchy-refresh-applications"
+cat >"$test_tmp/bin/update-desktop-database" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >>"$OMARCHY_TEST_LOG"
+SH
+chmod +x "$test_tmp/bin/omarchy-mise-install" "$test_tmp/bin/update-desktop-database"
 
-export PATH="$test_tmp/bin:$PATH"
+export PATH="$test_tmp/bin:$ROOT/bin:$PATH"
 export HOME="$test_tmp/home"
 export OMARCHY_TEST_LOG="$test_tmp/refresh.log"
+export OMARCHY_PATH="$ROOT"
 
 bash -euo pipefail "$migration" >/dev/null
-[[ $(<"$OMARCHY_TEST_LOG") == "refresh" ]] || fail "Telegram migration installs default launchers"
-pass "Telegram migration installs the launcher for existing users"
+installed_desktop="$HOME/.local/share/applications/Telegram.desktop"
+desktop-file-validate "$installed_desktop"
+python3 - "$installed_desktop" <<'PY'
+import configparser
+import sys
 
+desktop = configparser.ConfigParser(interpolation=None, strict=True)
+desktop.optionxform = str
+with open(sys.argv[1], encoding="utf-8") as launcher:
+    desktop.read_file(launcher)
+
+entry = desktop["Desktop Entry"]
+expected = {
+    "Name": "Telegram",
+    "Exec": "omarchy-launch-webapp https://web.telegram.org/",
+    "Icon": "telegram",
+}
+for field, value in expected.items():
+    if entry.get(field) != value:
+        raise SystemExit(f"{field}: expected {value!r}, got {entry.get(field)!r}")
+PY
+[[ $(<"$OMARCHY_TEST_LOG") == "$HOME/.local/share/applications" ]] ||
+  fail "Telegram migration refreshes the desktop application cache"
+pass "Telegram migration installs a valid frameless launcher for existing users"
+
+export HOME="$test_tmp/opt-out-home"
 mkdir -p "$HOME/.local/state/omarchy"
 touch "$HOME/.local/state/omarchy/preinstalls-removed"
-: >"$OMARCHY_TEST_LOG"
 bash -euo pipefail "$migration" >/dev/null
-[[ ! -s $OMARCHY_TEST_LOG ]] || fail "Telegram migration preserves the preinstall opt-out"
+[[ ! -e $HOME/.local/share/applications/Telegram.desktop ]] ||
+  fail "Telegram migration preserves the preinstall opt-out"
 pass "Telegram migration preserves the preinstall opt-out"
