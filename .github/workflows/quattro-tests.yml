@@ -1,0 +1,53 @@
+name: Quattro pull request tests
+
+on:
+  pull_request:
+    branches: [quattro]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Omarchy test suite (./test/all)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base
+      options: --init
+    steps:
+      - name: Install test dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            diffutils git imagemagick jq lua nodejs openssh pciutils python ripgrep shadow sudo
+          useradd --create-home test-runner
+
+      - name: Check out Omarchy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: omarchy
+          persist-credentials: false
+
+      - name: Check out package definitions
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: omacom-io/omarchy-pkgs
+          path: omarchy-pkgs
+          persist-credentials: false
+
+      - name: Check out installer definitions
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: omacom-io/omarchy-iso
+          path: omarchy-iso
+          persist-credentials: false
+
+      - name: Run authoritative test suite
+        working-directory: omarchy
+        run: |
+          chown -R test-runner:test-runner "$GITHUB_WORKSPACE"
+          runuser --user test-runner -- env \
+            HOME=/home/test-runner \
+            OMARCHY_ISO_PATH="$GITHUB_WORKSPACE/omarchy-iso" \
+            OMARCHY_PKGS_PATH="$GITHUB_WORKSPACE/omarchy-pkgs" \
+            PATH="$GITHUB_WORKSPACE/omarchy/bin:$PATH" \
+            ./test/all
