@@ -18,7 +18,7 @@ jobs:
       - name: Install test dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            diffutils git imagemagick jq lua nodejs openssh pciutils python ripgrep shadow sudo
+            desktop-file-utils diffutils git imagemagick jq lua nodejs openssh pciutils python ripgrep shadow sudo
           useradd --create-home test-runner
 
       - name: Check out Omarchy
