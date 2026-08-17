@@ -1,0 +1,184 @@
+#!/bin/bash
+#
+# Host-side guard for the omarchy-iso acceptance harness.
+
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ISO_REPO="${OMARCHY_ISO_REPO:-$(dirname "$ROOT")/omarchy-iso}"
+ISO=""
+PKGS_REPO=""
+BUILD=false
+SSH_PORT=2222
+MEMORY=""
+
+usage() {
+  cat <<'USAGE'
+Usage: test/acceptance-vm [options]
+
+Options:
+  --iso-repo DIR   omarchy-iso checkout (default: sibling ../omarchy-iso)
+  --iso FILE       existing Omarchy ISO to install or reuse
+  --build PKGS_DIR build an ISO from this checkout and an omarchy-pkgs checkout
+  --port PORT      host port forwarded to guest SSH (default: 2222)
+  --memory MB      VM memory (default: omarchy-iso harness default)
+  -h, --help       show this help
+USAGE
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    --iso-repo)
+      ISO_REPO="${2:-}"
+      shift 2
+      ;;
+    --iso)
+      ISO="${2:-}"
+      shift 2
+      ;;
+    --build)
+      BUILD=true
+      PKGS_REPO="${2:-}"
+      shift 2
+      ;;
+    --port)
+      SSH_PORT="${2:-}"
+      shift 2
+      ;;
+    --memory)
+      MEMORY="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z $ISO_REPO || ! -d $ISO_REPO ]]; then
+  echo "omarchy-iso checkout not found: ${ISO_REPO:-<empty>}" >&2
+  exit 1
+fi
+ISO_REPO=$(realpath "$ISO_REPO")
+ISO_TEST="$ISO_REPO/bin/omarchy-iso-test"
+ISO_MAKE="$ISO_REPO/bin/omarchy-iso-make"
+
+if [[ ! -x $ISO_TEST ]]; then
+  echo "Not an omarchy-iso checkout (missing executable $ISO_TEST)." >&2
+  exit 1
+fi
+if [[ -n $ISO && $BUILD == true ]]; then
+  echo "Use either --iso or --build, not both." >&2
+  exit 1
+fi
+if [[ ! $SSH_PORT =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+  echo "Invalid SSH port: $SSH_PORT" >&2
+  exit 1
+fi
+if [[ -n $MEMORY ]] && { [[ ! $MEMORY =~ ^[0-9]+$ ]] || (( MEMORY < 1024 )); }; then
+  echo "Invalid VM memory size: $MEMORY" >&2
+  exit 1
+fi
+
+# The delegated harness offers to install these packages. Refuse before calling
+# it instead, so validation cannot mutate the host package set implicitly.
+required_packages=(qemu-full edk2-ovmf socat imagemagick tesseract tesseract-data-eng)
+missing_packages=()
+for package in "${required_packages[@]}"; do
+  if ! "$ROOT/bin/omarchy-pkg-present" "$package"; then
+    missing_packages+=("$package")
+  fi
+done
+
+required_commands=(qemu-system-x86_64 qemu-img socat magick tesseract ssh sha256sum flock)
+missing_commands=()
+for command in "${required_commands[@]}"; do
+  if ! command -v "$command" >/dev/null; then
+    missing_commands+=("$command")
+  fi
+done
+
+ovmf_code="${OMARCHY_VM_OVMF_CODE:-/usr/share/edk2/x64/OVMF_CODE.4m.fd}"
+ovmf_vars="${OMARCHY_VM_OVMF_VARS_TEMPLATE:-/usr/share/edk2/x64/OVMF_VARS.4m.fd}"
+tessdata="${OMARCHY_VM_TESSDATA_ENG:-/usr/share/tessdata/eng.traineddata}"
+kvm_path="${OMARCHY_VM_KVM_PATH:-/dev/kvm}"
+missing_files=()
+[[ -f $ovmf_code ]] || missing_files+=("$ovmf_code")
+[[ -f $ovmf_vars ]] || missing_files+=("$ovmf_vars")
+[[ -f $tessdata ]] || missing_files+=("$tessdata")
+[[ -r $kvm_path && -w $kvm_path ]] || missing_files+=("$kvm_path (read/write access)")
+
+if (( ${#missing_packages[@]} > 0 || ${#missing_commands[@]} > 0 || ${#missing_files[@]} > 0 )); then
+  echo "Disposable VM prerequisites are missing; no VM was started and no packages were installed." >&2
+  (( ${#missing_packages[@]} == 0 )) || printf 'Missing packages: %s\n' "${missing_packages[*]}" >&2
+  (( ${#missing_commands[@]} == 0 )) || printf 'Missing commands: %s\n' "${missing_commands[*]}" >&2
+  (( ${#missing_files[@]} == 0 )) || printf 'Missing files/access: %s\n' "${missing_files[*]}" >&2
+  exit 1
+fi
+
+if $BUILD; then
+  if [[ -z $PKGS_REPO || ! -d $PKGS_REPO ]]; then
+    echo "omarchy-pkgs checkout not found: ${PKGS_REPO:-<empty>}" >&2
+    exit 1
+  fi
+  if [[ ! -x $ISO_MAKE ]]; then
+    echo "omarchy-iso build command is missing: $ISO_MAKE" >&2
+    exit 1
+  fi
+  if ! command -v docker >/dev/null; then
+    echo "Building a local-source ISO requires Docker; no VM was started." >&2
+    exit 1
+  fi
+
+  PKGS_REPO=$(realpath "$PKGS_REPO")
+  "$ISO_MAKE" --no-boot-offer --keep-pkg-cache --local-source "$ROOT" "$PKGS_REPO"
+  ISO=$(find "$ISO_REPO/release" -maxdepth 1 -type f -name '*.iso' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2- || true)
+fi
+
+if [[ -z $ISO ]]; then
+  ISO=$(find "$ISO_REPO/release" -maxdepth 1 -type f -name '*.iso' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)
+fi
+if [[ -z $ISO || ! -f $ISO ]]; then
+  echo "No ISO found. Pass --iso FILE or use --build PKGS_DIR." >&2
+  exit 1
+fi
+ISO=$(realpath "$ISO")
+
+iso_sha256=$(sha256sum "$ISO" | awk '{print $1}')
+base_name="vm-validation-${iso_sha256:0:16}"
+input_dir="$ISO_REPO/test-runs/vm-validation-inputs"
+managed_iso="$input_dir/$base_name.iso"
+mkdir -p "$input_dir"
+
+exec {base_lock}>"$ISO_REPO/test-runs/$base_name.lock"
+if ! flock -n "$base_lock"; then
+  echo "Another validation owns the disposable base namespace: $base_name" >&2
+  exit 1
+fi
+while IFS= read -r pidfile; do
+  pid=$(<"$pidfile")
+  if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "A VM is already running in $base_name (PID $pid); it was not stopped or reused." >&2
+    exit 1
+  fi
+done < <(find "$ISO_REPO/test-runs/$base_name/runs" -type f -name qemu.pid 2>/dev/null)
+
+if [[ ! -f $managed_iso ]]; then
+  cp "$ISO" "$managed_iso"
+elif [[ $(sha256sum "$managed_iso" | awk '{print $1}') != "$iso_sha256" ]]; then
+  echo "Refusing to overwrite mismatched managed ISO: $managed_iso" >&2
+  exit 1
+fi
+
+args=("$managed_iso" --reuse-base --sync-omarchy "$ROOT" --port "$SSH_PORT" --no-preview)
+[[ -z $MEMORY ]] || args+=(--memory "$MEMORY")
+
+printf '==> Disposable base: %s/test-runs/%s\n' "$ISO_REPO" "$base_name"
+"$ISO_TEST" "${args[@]}"
+printf '==> Evidence: %s/test-runs/%s/runs/\n' "$ISO_REPO" "$base_name"
